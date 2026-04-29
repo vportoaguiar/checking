@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 
 const GOOGLE_SHEET_ID = "1ZoN4-FuZ4SFqaZBRBBxWKEP9dQXnp-sbi7OJ9GG1Bo4";
 const SHEET_NAME = "CHECKING";
-const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || "";
+const API_KEY = AIzaSyA_1kWRT7fR2ee6EWh0e7NqxdjY8uv5KYU;
 
 const MESES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 const FORMATOS = [
