@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo, useRef } from "react";
 
 const GOOGLE_SHEET_ID = "1ZoN4-FuZ4SFqaZBRBBxWKEP9dQXnp-sbi7OJ9GG1Bo4";
 const SHEET_NAME = "CHECKING";
-const API_KEY = "AIzaSyA_1kWRT7fR2ee6EWh0e7NqxdjY8uv5KYU";
+const CACHE_KEY = "checking_cache";
+const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutos
 
 const MESES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 const FORMATOS = [
@@ -17,12 +18,61 @@ const FORMATOS = [
   "CHECKING PÚBLICO",
 ];
 
-const CACHE_KEY = "checking_cache";
-const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutos
-
 const hoje = () => new Date().toISOString().split("T")[0];
 const fmtDate = (d) => { if(!d) return "—"; const [y,m,dd]=d.split("-"); return `${dd}/${m}/${y.slice(2)}`; };
 const diasRestantes = (prazo) => prazo ? Math.ceil((new Date(prazo+"T00:00:00") - new Date(hoje()+"T00:00:00")) / 86400000) : null;
+
+// Parser CSV simples
+const parseCSV = (text) => {
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) return [];
+  
+  const headers = lines[0].split(',').map(h => h.trim());
+  const rows = lines.slice(1);
+  
+  return rows.map(line => {
+    const values = line.split(',').map(v => v.trim());
+    const obj = {};
+    headers.forEach((header, idx) => {
+      obj[header] = values[idx] || '';
+    });
+    return obj;
+  }).filter(obj => obj['ID CHECKING'] || obj['id']);
+};
+
+// Mapear CSV para formato do dashboard
+const mapCSVToOS = (csvData) => {
+  return csvData.map(row => {
+    // Tenta encontrar a coluna com case-insensitive
+    const getField = (names) => {
+      for (const name of names) {
+        for (const key of Object.keys(row)) {
+          if (key.toLowerCase().includes(name.toLowerCase())) {
+            return row[key];
+          }
+        }
+      }
+      return '';
+    };
+
+    return {
+      id: getField(['ID CHECKING', 'id']) || '',
+      cliente: getField(['CLIENTE', 'cliente']) || '—',
+      praca: getField(['PRAÇA', 'praca']) || '—',
+      prazoEntrega: getField(['PRAZO', 'prazo entrega']) || '',
+      dataSolicitacao: getField(['DATA', 'data solicitacao']) || '',
+      formato: getField(['FORMATO']) || FORMATOS[0],
+      atendimento: getField(['ATENDIMENTO', 'atendimento']) || '—',
+      campanha: getField(['CAMPANHA', 'nome campanha']) || '—',
+      nrCampanha: getField(['N°', 'numero campanha']) || '—',
+      opec: getField(['OPEC', 'opec solicitante']) || '—',
+      qtdPontos: getField(['QTD', 'quantidade']) || '1',
+      inicio: getField(['INICIO']) || '',
+      fim: getField(['FIM']) || '',
+      obs: getField(['OBS', 'observacao']) || '—',
+    };
+  }).filter(o => o.id);
+};
 
 export default function App() {
   const [os, setOs] = useState([]);
@@ -37,79 +87,22 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [dashMes, setDashMes] = useState(new Date().getMonth() + 1);
   const [dashAno, setDashAno] = useState(new Date().getFullYear());
+  const csvFileRef = useRef(null);
 
-  // Carregar dados do Google Sheets
-  const fetchFromSheets = async () => {
-    if (!API_KEY) {
-      showToast("API key não configurada. Usando dados em cache.", "aviso");
-      loadCache();
-      return;
-    }
+  // Carregar dados do cache ao iniciar
+  useEffect(() => {
+    loadCache();
+  }, []);
 
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${GOOGLE_SHEET_ID}/values/${SHEET_NAME}?key=${API_KEY}`;
-      const response = await fetch(url);
-      
-      if (!response.ok) throw new Error("Erro ao conectar ao Google Sheets");
-      
-      const data = await response.json();
-      const rows = data.values || [];
-      
-      if (rows.length < 2) {
-        showToast("Nenhum dado na planilha", "aviso");
-        return;
-      }
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
-      // Parse header (primeira linha)
-      const headers = rows[0];
-      const idIndex = headers.indexOf("ID CHECKING");
-      const clienteIndex = headers.indexOf("CLIENTE");
-      const pracaIndex = headers.indexOf("PRAÇA EXIBIDORA");
-      const prazoIndex = headers.indexOf("PRAZO ENTREGA FOTOS");
-      const dataIndex = headers.indexOf("DATA SOLICITAÇÃO CHECKING");
-      const formatoIndex = headers.indexOf("FORMATO DE CHECKING");
-      const atendimentoIndex = headers.indexOf("ATENDIMENTO");
-      const campanhaIndex = headers.indexOf("NOME CAMPANHA");
-      const nrCampanhaIndex = headers.indexOf("N° DA CAMPANHA");
-      const opecIndex = headers.indexOf("OPEC SOLICITANTE");
-      const qtdIndex = headers.indexOf("QTD VÍDEOS");
-      const inicioIndex = headers.indexOf("INICIO DA CAMPANHA");
-      const fimIndex = headers.indexOf("FIM DA CAMPANHA");
-      const obsIndex = headers.indexOf("OBSERVAÇÃO");
-
-      // Parse dados (linhas 2+)
-      const parsed = rows.slice(1).map((row, idx) => ({
-        id: row[idIndex] || `CHK-${String(idx).padStart(6, "0")}`,
-        cliente: row[clienteIndex] || "—",
-        praca: row[pracaIndex] || "—",
-        prazoEntrega: row[prazoIndex] || "",
-        dataSolicitacao: row[dataIndex] || "",
-        formato: row[formatoIndex] || FORMATOS[0],
-        atendimento: row[atendimentoIndex] || "—",
-        campanha: row[campanhaIndex] || "—",
-        nrCampanha: row[nrCampanhaIndex] || "—",
-        opec: row[opecIndex] || "—",
-        qtdPontos: row[qtdIndex] || "1",
-        inicio: row[inicioIndex] || "",
-        fim: row[fimIndex] || "",
-        obs: row[obsIndex] || "—",
-      })).filter(o => o.id && o.id !== "ID CHECKING");
-
-      setOs(parsed);
-      saveCache(parsed);
-      setLastSync(new Date().toLocaleTimeString('pt-BR'));
-      showToast(`${parsed.length} OS carregadas do Google Sheets`);
-    } catch (err) {
-      console.error("Erro:", err);
-      setError(err.message);
-      showToast("Erro ao carregar. Tentando cache...", "erro");
-      loadCache();
-    } finally {
-      setLoading(false);
-    }
+  const showToast = (msg, tipo = "sucesso") => {
+    setToast({ msg, tipo });
+    setTimeout(() => setToast(null), 3000);
   };
 
   const saveCache = (data) => {
@@ -122,29 +115,52 @@ export default function App() {
       try {
         const { data } = JSON.parse(cached);
         setOs(data);
-        showToast("Dados carregados do cache local", "aviso");
+        setLastSync(new Date().toLocaleTimeString('pt-BR'));
       } catch {
         showToast("Erro ao carregar cache", "erro");
       }
     }
   };
 
-  // Carregar dados ao iniciar
-  useEffect(() => {
-    fetchFromSheets();
-    const interval = setInterval(fetchFromSheets, CACHE_EXPIRY);
-    return () => clearInterval(interval);
-  }, []);
+  const handleCSVUpload = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-  useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+    setLoading(true);
+    const reader = new FileReader();
 
-  const showToast = (msg, tipo = "sucesso") => {
-    setToast({ msg, tipo });
-    setTimeout(() => setToast(null), 3000);
+    reader.onload = (e) => {
+      try {
+        const csvText = e.target?.result;
+        const csvData = parseCSV(csvText);
+        const mapped = mapCSVToOS(csvData);
+
+        if (mapped.length === 0) {
+          showToast("Nenhum dado válido no CSV", "erro");
+          setLoading(false);
+          return;
+        }
+
+        setOs(mapped);
+        saveCache(mapped);
+        setLastSync(new Date().toLocaleTimeString('pt-BR'));
+        showToast(`${mapped.length} OS carregadas do CSV`);
+        setError(null);
+      } catch (err) {
+        console.error("Erro:", err);
+        showToast("Erro ao processar CSV", "erro");
+      } finally {
+        setLoading(false);
+        if (csvFileRef.current) csvFileRef.current.value = "";
+      }
+    };
+
+    reader.onerror = () => {
+      showToast("Erro ao ler arquivo", "erro");
+      setLoading(false);
+    };
+
+    reader.readAsText(file);
   };
 
   const emptyForm = {
@@ -182,6 +198,7 @@ export default function App() {
       showToast("OS criada");
     }
 
+    saveCache(os);
     setForm(emptyForm);
     setEditId(null);
     setView("lista");
@@ -195,7 +212,9 @@ export default function App() {
 
   const handleDelete = (id) => {
     if (window.confirm("Remover esta OS?")) {
-      setOs(prev => prev.filter(o => o.id !== id));
+      const newOs = os.filter(o => o.id !== id);
+      setOs(newOs);
+      saveCache(newOs);
       showToast("OS removida");
     }
   };
@@ -302,9 +321,9 @@ export default function App() {
         </nav>
 
         <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: 8 }}>
-          <button onClick={() => { setForm(emptyForm); setEditId(null); setView("nova"); }} style={btn("#4A90D9", "#fff")} style={{ width: "100%", ...btn("#4A90D9", "#fff") }}>➕ Nova OS</button>
-          <button onClick={fetchFromSheets} disabled={loading} style={btn("#27AE60", "#fff")} style={{ width: "100%", opacity: loading ? 0.6 : 1, ...btn("#27AE60", "#fff") }}>{loading ? "⏳ Sincronizando..." : "🔄 Sincronizar"}</button>
-          <button onClick={handleExport} style={btn("#F5A623", "#fff")} style={{ width: "100%", ...btn("#F5A623", "#fff") }}>💾 Exportar</button>
+          <button onClick={() => { setForm(emptyForm); setEditId(null); setView("nova"); }} style={{ width: "100%", ...btn("#4A90D9", "#fff") }}>➕ Nova OS</button>
+          <button onClick={() => csvFileRef.current?.click()} disabled={loading} style={{ width: "100%", opacity: loading ? 0.6 : 1, ...btn("#3498DB", "#fff") }}>{loading ? "⏳ Carregando..." : "📤 Upload CSV"}</button>
+          <button onClick={handleExport} style={{ width: "100%", ...btn("#F5A623", "#fff") }}>💾 Exportar</button>
         </div>
 
         <div style={{ padding: "16px 20px", borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 11, color: "#6B7A99" }}>
@@ -350,7 +369,7 @@ export default function App() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead><tr style={{ background: "#F8F9FB", borderBottom: "1px solid #E0E4EC" }}>{["ID", "Cliente", "Praça", "Atendimento", "Prazo", "Dias", ""].map(h => <th key={h} style={{ padding: "12px 16px", textAlign: "left", fontWeight: 700, color: "#6B7A99", fontSize: 11, letterSpacing: 0.8 }}>{h}</th>)}</tr></thead>
                 <tbody>
-                  {lista.length === 0 ? <tr><td colSpan={7} style={{ padding: 32, textAlign: "center", color: "#6B7A99" }}>Nenhuma OS encontrada</td></tr> :
+                  {lista.length === 0 ? <tr><td colSpan={7} style={{ padding: 32, textAlign: "center", color: "#6B7A99" }}>Nenhuma OS encontrada. Faça upload de um CSV para começar.</td></tr> :
                     lista.map((o, i) => (
                       <tr key={o.id} style={{ borderBottom: "1px solid #F0F2F5", background: i % 2 === 0 ? "#fff" : "#FAFBFC" }}>
                         <td style={{ padding: "12px 16px" }}><span style={{ fontWeight: 700, color: "#4A90D9", fontFamily: "monospace", fontSize: 12 }}>{o.id}</span></td>
@@ -407,6 +426,15 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Input de arquivo escondido */}
+      <input
+        ref={csvFileRef}
+        type="file"
+        accept=".csv"
+        style={{ display: "none" }}
+        onChange={handleCSVUpload}
+      />
     </div>
   );
 }
